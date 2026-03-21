@@ -1,16 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
-import { Audio } from 'expo-av';
+import { useAudioRecorder, requestRecordingPermissionsAsync, RecordingPresets, setAudioModeAsync } from 'expo-audio';
 
-// Simple keyword detection using expo-av + volume spike pattern
+// Simple keyword detection using expo-audio + volume spike pattern
 // Triggers on "help" keyword detection
 export function useVoiceRecognition(onHelpDetected: () => void, enabled: boolean) {
   const [isActive, setIsActive] = useState(false);
+  const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
 
-  // Use expo-speech recognition via fetch to trigger
-  // Since react-native-voice needs native build, use a simpler approach:
-  // Detect sustained loud sound (2+ seconds) as distress signal
-
-  const recording = useRef<Audio.Recording | null>(null);
   const loudCount = useRef(0);
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -19,29 +15,25 @@ export function useVoiceRecognition(onHelpDetected: () => void, enabled: boolean
 
   const start = async () => {
     try {
-      const { status } = await Audio.requestPermissionsAsync();
+      const { status } = await requestRecordingPermissionsAsync();
       if (status !== 'granted') return;
 
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true,
-        playsInSilentModeIOS: true,
-        staysActiveInBackground: true,
-        shouldDuckAndroid: true,
-        playThroughEarpieceAndroid: false
+      await setAudioModeAsync({
+        allowsRecording: true,
+        playsInSilentMode: true,
+        shouldPlayInBackground: true,
+        allowsBackgroundRecording: true,
       });
 
-      const rec = new Audio.Recording();
-      await rec.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
-      await rec.startAsync();
-      recording.current = rec;
+      await recorder.prepareToRecordAsync();
+      recorder.record();
       setIsActive(true);
       loudCount.current = 0;
 
-      intervalRef.current = setInterval(async () => {
-        if (!recording.current) return;
-        const status = await recording.current.getStatusAsync();
-        if (status.isRecording && status.metering !== undefined) {
-          if (status.metering > VOICE_THRESHOLD) {
+      intervalRef.current = setInterval(() => {
+        const state = recorder.getStatus();
+        if (state.isRecording && state.metering !== undefined) {
+          if (state.metering > VOICE_THRESHOLD) {
             loudCount.current++;
             if (loudCount.current >= SUSTAINED_COUNT) {
               onHelpDetected();
@@ -60,10 +52,7 @@ export function useVoiceRecognition(onHelpDetected: () => void, enabled: boolean
 
   const stop = async () => {
     if (intervalRef.current) clearInterval(intervalRef.current);
-    if (recording.current) {
-      try { await recording.current.stopAndUnloadAsync(); } catch { }
-      recording.current = null;
-    }
+    try { await recorder.stop(); } catch { }
     setIsActive(false);
   };
 

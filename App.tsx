@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet,
-  Animated, Dimensions, ScrollView, StatusBar, TextInput
+  Animated, Dimensions, ScrollView, StatusBar, TextInput, Linking
 } from 'react-native';
 
 import { useLocation } from './hooks/useLocation';
@@ -10,7 +10,7 @@ import { useScreamDetection } from './hooks/useScreamDetection';
 import { useVoiceRecognition } from './hooks/useVoiceRecognition';
 import { saveSOSAlert, saveIncident } from './lib/supabase';
 import { getClaudeResponse } from './lib/claude';
-import MapView, { Marker, Circle, Polyline, Region } from 'react-native-maps';
+import { WebView } from 'react-native-webview';
 
 const { width } = Dimensions.get('window');
 
@@ -70,74 +70,86 @@ export default function App() {
   const loc = useLocation();
 
   const [policeStation, setPoliceStation] = useState<{
+    name: string;
     latitude: number;
     longitude: number;
-    name: string;
+    distance: string;
   } | null>(null);
-  const [routeCoords, setRouteCoords] = useState<{latitude: number; longitude: number}[]>([]);
-  const [loadingRoute, setLoadingRoute] = useState(false);
 
-  const TN_POLICE = [
-    { lat: 8.7139, lng: 77.7567, name: 'Tirunelveli Police Station' },
-    { lat: 8.7280, lng: 77.7480, name: 'Palayamkottai Police Station' },
-    { lat: 8.6950, lng: 77.7380, name: 'Melapalayam Police Station' },
-    { lat: 8.7420, lng: 77.7020, name: 'Ambasamudram Police Station' },
-  ];
+  const getDistanceKm = (lat1: number, lon1: number, lat2: number, lon2: number): string => {
+    const R = 6371;
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const a =
+      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+      Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    const km = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return km < 1 ? `${Math.round(km * 1000)}m` : `${km.toFixed(1)}km`;
+  };
 
-  const findPoliceRoute = async () => {
-    if (!loc) return;
-    setLoadingRoute(true);
-    
-    // Find nearest instantly without internet
-    const dist = (aLat: number, aLng: number, bLat: number, bLng: number) => 
-      Math.sqrt(Math.pow(aLat-bLat,2) + Math.pow(aLng-bLng,2));
+  const findNearestPolice = async () => {
+    const userLat = loc?.latitude ?? 13.0827;
+    const userLng = loc?.longitude ?? 80.2707;
 
-    let closest = TN_POLICE[0];
-    let minDist = dist(loc.latitude, loc.longitude, closest.lat, closest.lng);
+    // Step 1 - Instant hardcoded result
+    const TN_POLICE = [
+      { name: 'Chennai Central', latitude: 13.0827, longitude: 80.2707 },
+      { name: 'Egmore Police Station', latitude: 13.0732, longitude: 80.2609 },
+      { name: 'Perambur Police Station', latitude: 13.1186, longitude: 80.2479 },
+      { name: 'Adyar Police Station', latitude: 13.0067, longitude: 80.2206 },
+      { name: 'Anna Nagar Police Station', latitude: 13.0850, longitude: 80.2101 },
+      { name: 'Tirunelveli Police Station', latitude: 8.7139, longitude: 77.7567 },
+      { name: 'Madurai Police Station', latitude: 9.9252, longitude: 78.1198 },
+      { name: 'Coimbatore Police Station', latitude: 11.0168, longitude: 76.9558 },
+    ];
 
-    for (let i = 1; i < TN_POLICE.length; i++) {
-      const d = dist(loc.latitude, loc.longitude, TN_POLICE[i].lat, TN_POLICE[i].lng);
-      if (d < minDist) {
-        minDist = d;
-        closest = TN_POLICE[i];
-      }
-    }
+    const parseFloatDist = (lat1: number, lon1: number, lat2: number, lon2: number) => {
+      // Raw distance for fast comparison
+      return Math.sqrt(Math.pow(lat1 - lat2, 2) + Math.pow(lon1 - lon2, 2));
+    };
 
-    const targetLat = closest.lat;
-    const targetLng = closest.lng;
+    const nearest = TN_POLICE.reduce((prev, curr) => {
+      const d1 = parseFloatDist(userLat, userLng, curr.latitude, curr.longitude);
+      const d2 = parseFloatDist(userLat, userLng, prev.latitude, prev.longitude);
+      return d1 < d2 ? curr : prev;
+    });
 
-    // Show police station marker immediately without waiting for route
-    setPoliceStation({ latitude: targetLat, longitude: targetLng, name: closest.name });
+    setPoliceStation({
+      name: nearest.name,
+      latitude: nearest.latitude,
+      longitude: nearest.longitude,
+      distance: getDistanceKm(userLat, userLng, nearest.latitude, nearest.longitude),
+    });
 
+    // Step 2 - Overpass API in background with 3s timeout
     try {
-      const osrmUrl = `https://router.project-osrm.org/route/v1/driving/${loc.longitude},${loc.latitude};${targetLng},${targetLat}?overview=full&geometries=geojson`;
-      
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 3000);
-      
-      const routeRes = await fetch(osrmUrl, { signal: controller.signal });
+
+      const url = `https://overpass-api.de/api/interpreter?data=[out:json];node["amenity"="police"](around:5000,${userLat},${userLng});out 3;`;
+      const res = await fetch(url, { signal: controller.signal });
       clearTimeout(timeoutId);
       
-      const routeData = await routeRes.json();
-
-      if (routeData.routes && routeData.routes[0]) {
-        const coords = routeData.routes[0].geometry.coordinates.map((c: number[]) => ({
-          latitude: c[1],
-          longitude: c[0],
-        }));
-        setRouteCoords(coords);
-      } else {
-        setRouteCoords([{ latitude: loc.latitude, longitude: loc.longitude }, { latitude: targetLat, longitude: targetLng }]);
+      const data = await res.json();
+      if (data.elements && data.elements.length > 0) {
+        const station = data.elements[0];
+        setPoliceStation({
+          name: station.tags?.name || 'Police Station',
+          latitude: station.lat,
+          longitude: station.lon,
+          distance: getDistanceKm(userLat, userLng, station.lat, station.lon),
+        });
       }
-    } catch (err) {
-      console.warn('Route timeout or error, using straight line:', err);
-      setRouteCoords([{ latitude: loc.latitude, longitude: loc.longitude }, { latitude: targetLat, longitude: targetLng }]);
+    } catch {
+      // Keep hardcoded result if network fails
     }
-    setLoadingRoute(false);
   };
 
   useEffect(() => {
-    if (screen === 'map' && loc) findPoliceRoute();
+    if (screen === 'map') {
+      findNearestPolice();
+    }
   }, [screen, loc]);
 
   const pulseAnim1 = useRef(new Animated.Value(1)).current;
@@ -531,72 +543,85 @@ export default function App() {
               <Text style={s.h1}>Live Safety Map</Text>
               <Text style={s.incLoc}>Your location & nearest police station</Text>
               
-              <MapView
-                style={{ height: 320, borderRadius: 20, marginBottom: 12, marginTop: 20 }}
-                customMapStyle={darkMapStyle}
-                initialRegion={{
-                  latitude: loc?.latitude ?? 13.0827,
-                  longitude: loc?.longitude ?? 80.2707,
-                  latitudeDelta: 0.05,
-                  longitudeDelta: 0.05,
+              <WebView
+                style={{ height: 280, borderRadius: 20, marginBottom: 16, overflow: 'hidden', marginTop: 20 }}
+                source={{
+                  html: `
+                    <html>
+                      <head>
+                        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                        <style>
+                          body { margin: 0; padding: 0; background-color: #111; }
+                          iframe { filter: invert(90%) hue-rotate(180deg); border: 0; }
+                        </style>
+                      </head>
+                      <body style="margin:0;padding:0;background-color:#111;">
+                        <iframe 
+                          width="100%" 
+                          height="100%" 
+                          src="https://maps.google.com/maps?q=${loc?.latitude ?? 13.0827},${loc?.longitude ?? 80.2707}&z=16&output=embed&iwloc=&maptype=roadmap" 
+                          allowfullscreen>
+                        </iframe>
+                      </body>
+                    </html>
+                  `
                 }}
-                showsUserLocation={true}
-                showsMyLocationButton={false}
-              >
-                {/* User location pulse circle */}
-                {loc && (
-                  <Circle
-                    center={{ latitude: loc.latitude, longitude: loc.longitude }}
-                    radius={100}
-                    fillColor="rgba(97,218,251,0.15)"
-                    strokeColor="rgba(97,218,251,0.6)"
-                    strokeWidth={2}
-                  />
-                )}
+                scrollEnabled={false}
+              />
 
-                {/* Police Station Marker */}
-                {policeStation && (
-                  <Marker
-                    coordinate={{ latitude: policeStation.latitude, longitude: policeStation.longitude }}
-                    title={policeStation.name}
-                    description="Nearest Police Station"
+              {/* Police Station Card */}
+              {policeStation ? (
+                <View style={{
+                  backgroundColor: 'rgba(224,108,117,0.08)',
+                  borderWidth: 1,
+                  borderColor: 'rgba(224,108,117,0.25)',
+                  borderRadius: 16,
+                  padding: 14,
+                  marginBottom: 16,
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: 12,
+                }}>
+                  <Text style={{ fontSize: 28 }}>🚔</Text>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ color: '#aaa', fontSize: 9, letterSpacing: 2, marginBottom: 2 }}>
+                      NEAREST POLICE STATION
+                    </Text>
+                    <Text style={{ color: '#fff', fontSize: 14, fontWeight: 'bold' }}>
+                      {policeStation.name}
+                    </Text>
+                    <Text style={{ color: '#e06c75', fontSize: 12, marginTop: 2 }}>
+                      📍 {policeStation.distance} away
+                    </Text>
+                  </View>
+                  <TouchableOpacity
+                    onPress={() => {
+                      Linking.openURL(
+                        `https://www.google.com/maps/dir/${loc?.latitude},${loc?.longitude}/${policeStation.latitude},${policeStation.longitude}`
+                      );
+                    }}
+                    style={{
+                      backgroundColor: '#ff6b9d',
+                      borderRadius: 12,
+                      paddingVertical: 8,
+                      paddingHorizontal: 12,
+                      alignItems: 'center',
+                    }}
                   >
-                    <View style={{
-                      backgroundColor: '#e06c75',
-                      borderRadius: 20, padding: 6,
-                      borderWidth: 2, borderColor: '#fff'
-                    }}>
-                      <Text style={{ fontSize: 16 }}>🚔</Text>
-                    </View>
-                  </Marker>
-                )}
-                {/* Route line */}
-                {routeCoords.length > 0 && (
-                  <Polyline
-                    coordinates={routeCoords}
-                    strokeColor="#ff6b9d"
-                    strokeWidth={3}
-                    lineDashPattern={[1]}
-                  />
-                )}
-              </MapView>
-
-              {/* Loading / Route info */}
-              {loadingRoute ? (
-                <View style={s.powerSyncBadge}>
-                  <View style={[s.syncDot, { backgroundColor: '#ff6b9d' }]} />
+                    <Text style={{ color: '#fff', fontSize: 11, fontWeight: 'bold' }}>Get</Text>
+                    <Text style={{ color: '#fff', fontSize: 11, fontWeight: 'bold' }}>Route →</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                <View style={{
+                  backgroundColor: 'rgba(255,107,157,0.06)',
+                  borderRadius: 16, padding: 12, marginBottom: 16,
+                  flexDirection: 'row', alignItems: 'center', gap: 8,
+                }}>
+                  <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#ff6b9d' }} />
                   <Text style={{ color: '#ff6b9d', fontSize: 11 }}>Finding nearest police station...</Text>
                 </View>
-              ) : policeStation ? (
-                <View style={[s.powerSyncBadge, { backgroundColor: 'rgba(224,108,117,0.08)', borderColor: 'rgba(224,108,117,0.25)', flexDirection: 'row', alignItems: 'center' }]}>
-                  <Text style={{ fontSize: 16, marginRight: 10 }}>🚔</Text>
-                  <View style={{ flex: 1 }}>
-                    <Text style={{ color: '#e06c75', fontSize: 12, fontWeight: 'bold' }}>{policeStation.name}</Text>
-                    <Text style={{ color: '#777', fontSize: 10 }}>Route shown on map • Pink line</Text>
-                  </View>
-                  <Text style={{ color: '#e06c75', fontSize: 10, fontWeight: 'bold' }}>NEAREST</Text>
-                </View>
-              ) : null}
+              )}
 
               {/* Incidents */}
               <Text style={[s.sectionLabel, { marginTop: 20 }]}>NEARBY INCIDENTS</Text>

@@ -1,38 +1,34 @@
 import { useEffect, useRef, useState } from 'react';
-import { Audio } from 'expo-av';
+import { useAudioRecorder, requestRecordingPermissionsAsync, RecordingPresets, setAudioModeAsync } from 'expo-audio';
 
 export function useScreamDetection(onScream: () => void, enabled: boolean) {
-  const recording = useRef<Audio.Recording | null>(null);
-  const intervalRef = useRef<NodeJS.Timeout | null>(null);
   const [isListening, setIsListening] = useState(false);
-
+  const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  
+  const intervalRef = useRef<NodeJS.Timeout | null>(null);
   const SCREAM_THRESHOLD = -10; // dB threshold — loud sound
 
   const startListening = async () => {
     try {
-      const { status } = await Audio.requestPermissionsAsync();
+      const { status } = await requestRecordingPermissionsAsync();
       if (status !== 'granted') return;
 
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true,
-        playsInSilentModeIOS: true,
-        staysActiveInBackground: true,
-        shouldDuckAndroid: true,
-        playThroughEarpieceAndroid: false
+      await setAudioModeAsync({
+        allowsRecording: true,
+        playsInSilentMode: true,
+        shouldPlayInBackground: true,
+        allowsBackgroundRecording: true,
       });
 
-      const rec = new Audio.Recording();
-      await rec.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
-      await rec.startAsync();
-      recording.current = rec;
+      await recorder.prepareToRecordAsync();
+      recorder.record();
       setIsListening(true);
 
       // Check volume every 500ms
-      intervalRef.current = setInterval(async () => {
-        if (!recording.current) return;
-        const status = await recording.current.getStatusAsync();
-        if (status.isRecording && status.metering !== undefined) {
-          if (status.metering > SCREAM_THRESHOLD) {
+      intervalRef.current = setInterval(() => {
+        const state = recorder.getStatus();
+        if (state.isRecording && state.metering !== undefined) {
+          if (state.metering > SCREAM_THRESHOLD) {
             onScream();
             stopListening();
           }
@@ -45,12 +41,9 @@ export function useScreamDetection(onScream: () => void, enabled: boolean) {
 
   const stopListening = async () => {
     if (intervalRef.current) clearInterval(intervalRef.current);
-    if (recording.current) {
-      try {
-        await recording.current.stopAndUnloadAsync();
-      } catch {}
-      recording.current = null;
-    }
+    try {
+      await recorder.stop();
+    } catch {}
     setIsListening(false);
   };
 
