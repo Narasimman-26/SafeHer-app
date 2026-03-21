@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "SafeHer",
+    "name": "Safeher",
     "slug": "safeher",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -9,34 +9,26 @@
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#0a0c10"
+      "backgroundColor": "#0c0010"
     },
+    "ios": { "supportsTablet": true },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/android-icon-foreground.png",
-        "backgroundColor": "#0a0c10"
+        "backgroundImage": "./assets/android-icon-background.png"
       },
-      "permissions": [
-        "ACCESS_FINE_LOCATION",
-        "ACCESS_COARSE_LOCATION",
-        "VIBRATE",
-        "android.permission.ACCESS_COARSE_LOCATION",
-        "android.permission.ACCESS_FINE_LOCATION"
-      ],
-      "package": "com.safeher.app"
+      "package": "com.safeher.app",
+      "permissions": ["RECORD_AUDIO"]
     },
+    "web": { "favicon": "./assets/favicon.png" },
     "plugins": [
+      "expo-location",
       [
-        "expo-location",
+        "expo-av",
         {
-          "locationWhenInUsePermission": "SafeHer needs location for emergency alerts."
+          "microphonePermission": "Allow SafeHer to access your microphone to detect SOS screams."
         }
       ]
-    ],
-    "extra": {
-      "eas": {
-        "projectId": "d212e996-6f38-496d-a9a8-19e38d74d7f3"
-      }
-    }
+    ]
   }
 }

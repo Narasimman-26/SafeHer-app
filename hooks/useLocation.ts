@@ -1,27 +1,17 @@
-import * as Location from 'expo-location'
+import { useState, useEffect } from 'react';
+import * as Location from 'expo-location';
 
-export async function getLocation() {
-    const { status } = await Location.requestForegroundPermissionsAsync()
-    if (status !== 'granted') {
-        throw new Error('Location permission denied')
-    }
+export function useLocation() {
+  const [location, setLocation] = useState<{ latitude: number; longitude: number } | null>(null);
 
-    const loc = await Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.High,
-    })
+  useEffect(() => {
+    (async () => {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') return;
+      const loc = await Location.getCurrentPositionAsync({});
+      setLocation({ latitude: loc.coords.latitude, longitude: loc.coords.longitude });
+    })();
+  }, []);
 
-    const [place] = await Location.reverseGeocodeAsync({
-        latitude: loc.coords.latitude,
-        longitude: loc.coords.longitude,
-    })
-
-    const area = [place.district, place.city]
-        .filter(Boolean)
-        .join(', ')
-
-    return {
-        lat: loc.coords.latitude,
-        lon: loc.coords.longitude,
-        area: area || 'Unknown Area',
-    }
+  return location;
 }
