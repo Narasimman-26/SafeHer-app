@@ -9,29 +9,32 @@ import { useShake } from './hooks/useShake';
 import { useScreamDetection } from './hooks/useScreamDetection';
 import { useVoiceRecognition } from './hooks/useVoiceRecognition';
 import { saveSOSAlert, saveIncident } from './lib/supabase';
+import { setupPowerSync, powerSync } from './lib/powersync';
 import { getClaudeResponse } from './lib/claude';
-import { WebView } from 'react-native-webview';
+import MapView, { Marker, PROVIDER_GOOGLE } from 'react-native-maps';
+import { testNeonConnection } from './lib/neon';
+
 
 const { width } = Dimensions.get('window');
 
-type Screen   = 'home' | 'sos' | 'map' | 'chat' | 'report';
+type Screen = 'home' | 'sos' | 'map' | 'chat' | 'report';
 type SOSStage = 'idle' | 'countdown' | 'sending' | 'sent';
 
 const CONTACTS = [
-  { name: 'Mom',    phone: '+91 98765 43210', emoji: '👩', color: '#ff6b9d', relation: 'Mother'    },
-  { name: 'Priya',  phone: '+91 87654 32109', emoji: '👧', color: '#c678dd', relation: 'Friend'    },
-  { name: 'Police', phone: '112',             emoji: '🚔', color: '#e06c75', relation: 'Emergency' },
+  { name: 'Mom', phone: '+91 98765 43210', emoji: '👩', color: '#ff6b9d', relation: 'Mother' },
+  { name: 'Priya', phone: '+91 87654 32109', emoji: '👧', color: '#c678dd', relation: 'Friend' },
+  { name: 'Police', phone: '112', emoji: '🚔', color: '#e06c75', relation: 'Emergency' },
 ];
 
 const INCIDENTS = [
-  { type: 'Unsafe Area',         loc: 'Oak St & 3rd Ave',    time: '2m ago',  sev: 'high'   },
-  { type: 'Poor Lighting',       loc: 'Riverside Park Path', time: '15m ago', sev: 'medium' },
-  { type: 'Suspicious Activity', loc: 'Central Station',     time: '1hr ago', sev: 'medium' },
-  { type: 'All Clear',           loc: 'Main Campus Road',    time: '2hr ago', sev: 'low'    },
+  { type: 'Unsafe Area', loc: 'Oak St & 3rd Ave', time: '2m ago', sev: 'high' },
+  { type: 'Poor Lighting', loc: 'Riverside Park Path', time: '15m ago', sev: 'medium' },
+  { type: 'Suspicious Activity', loc: 'Central Station', time: '1hr ago', sev: 'medium' },
+  { type: 'All Clear', loc: 'Main Campus Road', time: '2hr ago', sev: 'low' },
 ];
 
 const REPORT_TYPES = [
-  'Suspicious Activity', 'Poor Lighting', 'Unsafe Area', 
+  'Suspicious Activity', 'Poor Lighting', 'Unsafe Area',
   'Harassment', 'Accident', 'Other'
 ];
 
@@ -49,25 +52,28 @@ const darkMapStyle = [
 ];
 
 export default function App() {
-  const [screen,    setScreen]    = useState<Screen>('home');
-  const [sosStage,  setSosStage]  = useState<SOSStage>('idle');
-  const [count,     setCount]     = useState(5);
-  const [sentIdx,   setSentIdx]   = useState(0);
+  const [screen, setScreen] = useState<Screen>('home');
+  const [sosStage, setSosStage] = useState<SOSStage>('idle');
+  const [count, setCount] = useState(5);
+  const [sentIdx, setSentIdx] = useState(0);
   const [locShared, setLocShared] = useState(false);
-  const [syncing,   setSyncing]   = useState(false);
+  const [syncing, setSyncing] = useState(false);
   const [safetyListening, setSafetyListening] = useState(true); // always on
   const [screamAlert, setScreamAlert] = useState(false);
-  const [chatMsgs,  setChatMsgs]  = useState<{from: 'ai' | 'user', text: string}[]>([
+  const [chatMsgs, setChatMsgs] = useState<{ from: 'ai' | 'user', text: string }[]>([
     { from: 'ai', text: "Hi! I'm your AI safety companion 🛡️ How can I help?" }
   ]);
   const [chatInput, setChatInput] = useState('');
-  const [chatLoad,  setChatLoad]  = useState(false);
-  const [repType,   setRepType]   = useState('');
-  const [repLoc,    setRepLoc]    = useState('');
+  const [chatLoad, setChatLoad] = useState(false);
+  const [repType, setRepType] = useState('');
+  const [repLoc, setRepLoc] = useState('');
   const [repDetail, setRepDetail] = useState('');
-  const [repDone,   setRepDone]   = useState(false);
+  const [repDone, setRepDone] = useState(false);
 
   const loc = useLocation();
+  const mapRef = useRef<MapView>(null);
+  const [hasCentered, setHasCentered] = useState(false);
+
 
   const [policeStation, setPoliceStation] = useState<{
     name: string;
@@ -75,6 +81,7 @@ export default function App() {
     longitude: number;
     distance: string;
   } | null>(null);
+
 
   const getDistanceKm = (lat1: number, lon1: number, lat2: number, lon2: number): string => {
     const R = 6371;
@@ -92,26 +99,69 @@ export default function App() {
     const userLat = loc?.latitude ?? 13.0827;
     const userLng = loc?.longitude ?? 80.2707;
 
-    // Step 1 - Instant hardcoded result
-    const TN_POLICE = [
-      { name: 'Chennai Central', latitude: 13.0827, longitude: 80.2707 },
-      { name: 'Egmore Police Station', latitude: 13.0732, longitude: 80.2609 },
-      { name: 'Perambur Police Station', latitude: 13.1186, longitude: 80.2479 },
-      { name: 'Adyar Police Station', latitude: 13.0067, longitude: 80.2206 },
-      { name: 'Anna Nagar Police Station', latitude: 13.0850, longitude: 80.2101 },
-      { name: 'Tirunelveli Police Station', latitude: 8.7139, longitude: 77.7567 },
-      { name: 'Madurai Police Station', latitude: 9.9252, longitude: 78.1198 },
-      { name: 'Coimbatore Police Station', latitude: 11.0168, longitude: 76.9558 },
+    // Step 1 - Try Overpass API first (most accurate), 10km radius, 8s timeout
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 8000);
+
+      const url = `https://overpass-api.de/api/interpreter?data=[out:json];(node["amenity"="police"](around:10000,${userLat},${userLng});way["amenity"="police"](around:10000,${userLat},${userLng}););out center 5;`;
+      const res = await fetch(url, { signal: controller.signal });
+      clearTimeout(timeoutId);
+
+      const data = await res.json();
+      if (data.elements && data.elements.length > 0) {
+        // Pick the closest one by real distance
+        const candidates = data.elements
+          .map((el: any) => ({
+            name: el.tags?.name || el.tags?.['name:en'] || 'Police Station',
+            latitude: el.lat ?? el.center?.lat,
+            longitude: el.lon ?? el.center?.lon,
+          }))
+          .filter((el: any) => el.latitude && el.longitude);
+
+        if (candidates.length > 0) {
+          const closest = candidates.reduce((prev: any, curr: any) => {
+            const d1 = Math.sqrt(Math.pow(userLat - curr.latitude, 2) + Math.pow(userLng - curr.longitude, 2));
+            const d2 = Math.sqrt(Math.pow(userLat - prev.latitude, 2) + Math.pow(userLng - prev.longitude, 2));
+            return d1 < d2 ? curr : prev;
+          });
+          setPoliceStation({
+            name: closest.name,
+            latitude: closest.latitude,
+            longitude: closest.longitude,
+            distance: getDistanceKm(userLat, userLng, closest.latitude, closest.longitude),
+          });
+          return;
+        }
+      }
+    } catch {
+      // Overpass failed, fall through to hardcoded list
+    }
+
+    // Step 2 - Fallback: expanded hardcoded list
+    const FALLBACK_POLICE = [
+      { name: 'Chennai Central PS', latitude: 13.0827, longitude: 80.2707 },
+      { name: 'Egmore PS', latitude: 13.0732, longitude: 80.2609 },
+      { name: 'Perambur PS', latitude: 13.1186, longitude: 80.2479 },
+      { name: 'Adyar PS', latitude: 13.0067, longitude: 80.2206 },
+      { name: 'Anna Nagar PS', latitude: 13.0850, longitude: 80.2101 },
+      { name: 'Tambaram PS', latitude: 12.9249, longitude: 80.1000 },
+      { name: 'Velachery PS', latitude: 12.9815, longitude: 80.2180 },
+      { name: 'T.Nagar PS', latitude: 13.0418, longitude: 80.2341 },
+      { name: 'Mylapore PS', latitude: 13.0339, longitude: 80.2673 },
+      { name: 'Tirunelveli PS', latitude: 8.7139, longitude: 77.7567 },
+      { name: 'Madurai PS', latitude: 9.9252, longitude: 78.1198 },
+      { name: 'Coimbatore PS', latitude: 11.0168, longitude: 76.9558 },
+      { name: 'Trichy PS', latitude: 10.7905, longitude: 78.7047 },
+      { name: 'Salem PS', latitude: 11.6643, longitude: 78.1460 },
+      { name: 'Vellore PS', latitude: 12.9165, longitude: 79.1325 },
+      { name: 'Erode PS', latitude: 11.3410, longitude: 77.7172 },
+      { name: 'Hosur PS', latitude: 12.7409, longitude: 77.8253 },
     ];
 
-    const parseFloatDist = (lat1: number, lon1: number, lat2: number, lon2: number) => {
-      // Raw distance for fast comparison
-      return Math.sqrt(Math.pow(lat1 - lat2, 2) + Math.pow(lon1 - lon2, 2));
-    };
-
-    const nearest = TN_POLICE.reduce((prev, curr) => {
-      const d1 = parseFloatDist(userLat, userLng, curr.latitude, curr.longitude);
-      const d2 = parseFloatDist(userLat, userLng, prev.latitude, prev.longitude);
+    const nearest = FALLBACK_POLICE.reduce((prev, curr) => {
+      const d1 = Math.sqrt(Math.pow(userLat - curr.latitude, 2) + Math.pow(userLng - curr.longitude, 2));
+      const d2 = Math.sqrt(Math.pow(userLat - prev.latitude, 2) + Math.pow(userLng - prev.longitude, 2));
       return d1 < d2 ? curr : prev;
     });
 
@@ -121,30 +171,11 @@ export default function App() {
       longitude: nearest.longitude,
       distance: getDistanceKm(userLat, userLng, nearest.latitude, nearest.longitude),
     });
-
-    // Step 2 - Overpass API in background with 3s timeout
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 3000);
-
-      const url = `https://overpass-api.de/api/interpreter?data=[out:json];node["amenity"="police"](around:5000,${userLat},${userLng});out 3;`;
-      const res = await fetch(url, { signal: controller.signal });
-      clearTimeout(timeoutId);
-      
-      const data = await res.json();
-      if (data.elements && data.elements.length > 0) {
-        const station = data.elements[0];
-        setPoliceStation({
-          name: station.tags?.name || 'Police Station',
-          latitude: station.lat,
-          longitude: station.lon,
-          distance: getDistanceKm(userLat, userLng, station.lat, station.lon),
-        });
-      }
-    } catch {
-      // Keep hardcoded result if network fails
-    }
   };
+
+  useEffect(() => {
+    setupPowerSync();
+  }, []);
 
   useEffect(() => {
     if (screen === 'map') {
@@ -152,9 +183,22 @@ export default function App() {
     }
   }, [screen, loc]);
 
+  useEffect(() => {
+    if (loc && !hasCentered && mapRef.current && screen === 'map') {
+      mapRef.current.animateToRegion({
+        latitude: loc.latitude,
+        longitude: loc.longitude,
+        latitudeDelta: 0.01,
+        longitudeDelta: 0.01,
+      }, 1000);
+      setHasCentered(true);
+    }
+  }, [loc, screen, hasCentered]);
+
   const pulseAnim1 = useRef(new Animated.Value(1)).current;
   const pulseAnim2 = useRef(new Animated.Value(1)).current;
   const pulseAnim3 = useRef(new Animated.Value(1)).current;
+  const mapPulseAnim = useRef(new Animated.Value(1)).current;
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const scaleAnim = useRef(new Animated.Value(0.9)).current;
 
@@ -174,11 +218,25 @@ export default function App() {
     const t2 = setTimeout(() => animatePulse(pulseAnim2), 600);
     const t3 = setTimeout(() => animatePulse(pulseAnim3), 1200);
 
+    // Blue dot pulse
+    const animateMapPulse = () => {
+      Animated.sequence([
+        Animated.timing(mapPulseAnim, { toValue: 2, duration: 2000, useNativeDriver: true }),
+        Animated.timing(mapPulseAnim, { toValue: 1, duration: 0, useNativeDriver: true })
+      ]).start((res) => {
+        if (res.finished && !unmounted) animateMapPulse();
+      });
+    };
+    animateMapPulse();
+
     return () => {
       unmounted = true;
       clearTimeout(t2);
       clearTimeout(t3);
     };
+  }, []);
+  useEffect(() => {
+    testNeonConnection();
   }, []);
 
   useEffect(() => {
@@ -253,6 +311,12 @@ export default function App() {
           const t2 = setTimeout(() => {
             setSyncing(false);
             setSosStage('sent');
+            // Save to PowerSync for local-first sync
+            powerSync.execute(
+              'INSERT INTO sos_alerts (user_id, latitude, longitude, area, station_name, alert_message, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+              ['user-123', loc?.latitude || 0, loc?.longitude || 0, 'Current Location', policeStation?.name || 'Unknown', 'Emergency SOS Triggered', 'pending', new Date().toISOString()]
+            );
+            // Also keep the direct Supabase call for now if needed, or rely on PowerSync
             saveSOSAlert(loc?.latitude || 0, loc?.longitude || 0);
           }, 1200);
           return () => clearTimeout(t2);
@@ -288,6 +352,13 @@ export default function App() {
   const submitReport = () => {
     if (!repType) return;
     setSyncing(true);
+    setSyncing(true);
+    // Sync incident via PowerSync
+    powerSync.execute(
+      'INSERT INTO incidents (type, location, details, severity, created_at) VALUES (?, ?, ?, ?, ?)',
+      [repType, repLoc, repDetail, 'medium', new Date().toISOString()]
+    );
+    // Also keep direct call if desirable
     saveIncident(repType, repLoc, repDetail);
     const t = setTimeout(() => {
       setSyncing(false);
@@ -330,7 +401,7 @@ export default function App() {
         <Text style={[s.navText, screen === 'map' && s.navTextActive]}>Map</Text>
         {screen === 'map' && <View style={s.navDot} />}
       </TouchableOpacity>
-      <TouchableOpacity style={s.navItemSOS} onPress={() => setScreen('sos')}>
+      <TouchableOpacity style={s.navItemSOS} onPress={() => { setScreen('sos'); triggerSOS(); }}>
         <Text style={s.navSOSText}>SOS</Text>
       </TouchableOpacity>
       <TouchableOpacity style={s.navItem} onPress={() => setScreen('chat')}>
@@ -358,10 +429,10 @@ export default function App() {
         </View>
       )}
       {renderHeader()}
-      
+
       <ScrollView contentContainerStyle={s.scroll} showsVerticalScrollIndicator={false}>
         <Animated.View style={{ opacity: fadeAnim, transform: [{ scale: scaleAnim }] }}>
-          
+
           {/* HOME SCREEN */}
           {screen === 'home' && sosStage === 'idle' && (
             <View style={s.center}>
@@ -394,9 +465,9 @@ export default function App() {
               </View>
 
               <View style={s.sosWrapper}>
-                <Animated.View style={[s.ring, s.ring1, { transform: [{ scale: pulseAnim1 }], opacity: pulseAnim1.interpolate({ inputRange:[1,2.5], outputRange:[0.4,0] }) }]} />
-                <Animated.View style={[s.ring, s.ring2, { transform: [{ scale: pulseAnim2 }], opacity: pulseAnim2.interpolate({ inputRange:[1,2.5], outputRange:[0.25,0] }) }]} />
-                <Animated.View style={[s.ring, s.ring3, { transform: [{ scale: pulseAnim3 }], opacity: pulseAnim3.interpolate({ inputRange:[1,2.5], outputRange:[0.15,0] }) }]} />
+                <Animated.View style={[s.ring, s.ring1, { transform: [{ scale: pulseAnim1 }], opacity: pulseAnim1.interpolate({ inputRange: [1, 2.5], outputRange: [0.4, 0] }) }]} />
+                <Animated.View style={[s.ring, s.ring2, { transform: [{ scale: pulseAnim2 }], opacity: pulseAnim2.interpolate({ inputRange: [1, 2.5], outputRange: [0.25, 0] }) }]} />
+                <Animated.View style={[s.ring, s.ring3, { transform: [{ scale: pulseAnim3 }], opacity: pulseAnim3.interpolate({ inputRange: [1, 2.5], outputRange: [0.15, 0] }) }]} />
                 <TouchableOpacity style={s.sosBtn} onPress={triggerSOS} activeOpacity={0.85}>
                   <Text style={s.sosBtnEmoji}>🆘</Text>
                   <Text style={s.sosBtnText}>SOS</Text>
@@ -441,8 +512,8 @@ export default function App() {
                 <>
                   <Text style={s.sosTitle}>Emergency SOS</Text>
                   <View style={s.sosWrapper}>
-                    <Animated.View style={[s.ring, s.ring1, { transform: [{ scale: pulseAnim1 }], opacity: pulseAnim1.interpolate({ inputRange:[1,2.5], outputRange:[0.4,0] }) }]} />
-                    <Animated.View style={[s.ring, s.ring2, { transform: [{ scale: pulseAnim2 }], opacity: pulseAnim2.interpolate({ inputRange:[1,2.5], outputRange:[0.25,0] }) }]} />
+                    <Animated.View style={[s.ring, s.ring1, { transform: [{ scale: pulseAnim1 }], opacity: pulseAnim1.interpolate({ inputRange: [1, 2.5], outputRange: [0.4, 0] }) }]} />
+                    <Animated.View style={[s.ring, s.ring2, { transform: [{ scale: pulseAnim2 }], opacity: pulseAnim2.interpolate({ inputRange: [1, 2.5], outputRange: [0.25, 0] }) }]} />
                     <TouchableOpacity style={s.sosBtn} onPress={triggerSOS}>
                       <Text style={s.sosBtnEmoji}>🆘</Text>
                       <Text style={s.sosBtnText}>SOS</Text>
@@ -466,8 +537,8 @@ export default function App() {
                 <>
                   <Text style={[s.alertLabel, { color: '#c41a1a' }]}>⚡ SENDING ALERT IN...</Text>
                   <View style={s.sosWrapper}>
-                    <Animated.View style={[s.ring, s.ring1, { transform: [{ scale: pulseAnim1 }], opacity: pulseAnim1.interpolate({ inputRange:[1,2.5], outputRange:[0.5,0] }) }]} />
-                    <Animated.View style={[s.ring, s.ring2, { transform: [{ scale: pulseAnim2 }], opacity: pulseAnim2.interpolate({ inputRange:[1,2.5], outputRange:[0.3,0] }) }]} />
+                    <Animated.View style={[s.ring, s.ring1, { transform: [{ scale: pulseAnim1 }], opacity: pulseAnim1.interpolate({ inputRange: [1, 2.5], outputRange: [0.5, 0] }) }]} />
+                    <Animated.View style={[s.ring, s.ring2, { transform: [{ scale: pulseAnim2 }], opacity: pulseAnim2.interpolate({ inputRange: [1, 2.5], outputRange: [0.3, 0] }) }]} />
                     <View style={s.countdownCircle}>
                       <Text style={s.countNum}>{count}</Text>
                     </View>
@@ -486,7 +557,7 @@ export default function App() {
                   <View style={s.radarBox}>
                     <Text style={{ fontSize: 36, zIndex: 10 }}>📡</Text>
                     {[80, 110, 140].map((size, i) => (
-                      <View key={i} style={{ position: 'absolute', width: size, height: size, borderRadius: size/2, borderWidth: 1.5, borderColor: i < sentIdx ? '#ff6b9d' : 'rgba(255,107,157,0.2)' }} />
+                      <View key={i} style={{ position: 'absolute', width: size, height: size, borderRadius: size / 2, borderWidth: 1.5, borderColor: i < sentIdx ? '#ff6b9d' : 'rgba(255,107,157,0.2)' }} />
                     ))}
                   </View>
                   {CONTACTS.map((c, i) => {
@@ -542,32 +613,50 @@ export default function App() {
             <View style={s.pad20}>
               <Text style={s.h1}>Live Safety Map</Text>
               <Text style={s.incLoc}>Your location & nearest police station</Text>
-              
-              <WebView
-                style={{ height: 280, borderRadius: 20, marginBottom: 16, overflow: 'hidden', marginTop: 20 }}
-                source={{
-                  html: `
-                    <html>
-                      <head>
-                        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                        <style>
-                          body { margin: 0; padding: 0; background-color: #111; }
-                          iframe { filter: invert(90%) hue-rotate(180deg); border: 0; }
-                        </style>
-                      </head>
-                      <body style="margin:0;padding:0;background-color:#111;">
-                        <iframe 
-                          width="100%" 
-                          height="100%" 
-                          src="https://maps.google.com/maps?q=${loc?.latitude ?? 13.0827},${loc?.longitude ?? 80.2707}&z=16&output=embed&iwloc=&maptype=roadmap" 
-                          allowfullscreen>
-                        </iframe>
-                      </body>
-                    </html>
-                  `
-                }}
-                scrollEnabled={false}
-              />
+
+              <View style={{ height: 320, borderRadius: 20, marginBottom: 16, overflow: 'hidden', marginTop: 20 }}>
+                <MapView
+                  ref={mapRef}
+                  provider={PROVIDER_GOOGLE}
+                  style={StyleSheet.absoluteFillObject}
+                  showsUserLocation={true}
+                  showsMyLocationButton={false}
+                  customMapStyle={darkMapStyle}
+                  initialRegion={{
+                    latitude: loc?.latitude ?? 13.0827,
+                    longitude: loc?.longitude ?? 80.2707,
+                    latitudeDelta: 0.01,
+                    longitudeDelta: 0.01,
+                  }}
+                >
+                  {policeStation && (
+                    <Marker
+                      coordinate={{ latitude: policeStation.latitude, longitude: policeStation.longitude }}
+                      title={policeStation.name}
+                      description={`${policeStation.distance} away`}
+                    >
+                      <Text style={{ fontSize: 24 }}>🚔</Text>
+                    </Marker>
+                  )}
+                </MapView>
+
+                {/* Re-center Button */}
+                <TouchableOpacity
+                  style={s.reCenterBtn}
+                  onPress={() => {
+                    if (loc && mapRef.current) {
+                      mapRef.current.animateToRegion({
+                        latitude: loc.latitude,
+                        longitude: loc.longitude,
+                        latitudeDelta: 0.01,
+                        longitudeDelta: 0.01,
+                      }, 1000);
+                    }
+                  }}
+                >
+                  <Text style={{ fontSize: 18 }}>🎯</Text>
+                </TouchableOpacity>
+              </View>
 
               {/* Police Station Card */}
               {policeStation ? (
@@ -596,9 +685,14 @@ export default function App() {
                   </View>
                   <TouchableOpacity
                     onPress={() => {
-                      Linking.openURL(
-                        `https://www.google.com/maps/dir/${loc?.latitude},${loc?.longitude}/${policeStation.latitude},${policeStation.longitude}`
-                      );
+                      const url = `google.navigation:q=${policeStation.latitude},${policeStation.longitude}`;
+                      Linking.canOpenURL(url).then(supported => {
+                        if (supported) {
+                          Linking.openURL(url);
+                        } else {
+                          Linking.openURL(`https://www.google.com/maps/dir/?api=1&destination=${policeStation.latitude},${policeStation.longitude}`);
+                        }
+                      });
                     }}
                     style={{
                       backgroundColor: '#ff6b9d',
@@ -684,7 +778,7 @@ export default function App() {
                 <>
                   <Text style={s.h1}>Report Incident</Text>
                   <Text style={[s.incLoc, { marginBottom: 20 }]}>Help keep the community safe</Text>
-                  
+
                   <View style={s.grid2x2}>
                     {REPORT_TYPES.map(type => (
                       <TouchableOpacity key={type} style={[s.repTypeBtn, repType === type && { borderColor: '#ff6b9d', backgroundColor: 'rgba(255,107,157,0.1)' }]} onPress={() => setRepType(type)}>
@@ -692,7 +786,7 @@ export default function App() {
                       </TouchableOpacity>
                     ))}
                   </View>
-                  
+
                   <TextInput
                     style={s.textInput}
                     placeholder="Location details (e.g. Park Street)"
@@ -708,7 +802,7 @@ export default function App() {
                     onChangeText={setRepDetail}
                     multiline
                   />
-                  
+
                   <TouchableOpacity style={[s.submitBtn, !repType && { backgroundColor: '#333' }]} onPress={submitReport}>
                     <Text style={{ color: '#fff', fontWeight: 'bold' }}>Submit Report</Text>
                   </TouchableOpacity>
@@ -719,8 +813,8 @@ export default function App() {
                   <Text style={[s.h1, { color: '#50fa7b' }]}>Thank You!</Text>
                   <Text style={s.incLoc}>Your report helps keep everyone safe.</Text>
                   <View style={[s.powerSyncBadge, { marginTop: 20, marginBottom: 30 }]}>
-                     <View style={[s.syncDot, { backgroundColor: '#50fa7b' }]} />
-                     <Text style={{ color: '#50fa7b', fontSize: 10 }}>SYNCED VIA POWERSYNC → NEON DB</Text>
+                    <View style={[s.syncDot, { backgroundColor: '#50fa7b' }]} />
+                    <Text style={{ color: '#50fa7b', fontSize: 10 }}>SYNCED VIA POWERSYNC → NEON DB</Text>
                   </View>
                   <TouchableOpacity style={s.safeBtn} onPress={() => setRepDone(false)}>
                     <Text style={s.safeBtnText}>Report Another</Text>
@@ -739,6 +833,42 @@ export default function App() {
 
 const s = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#0c0010' },
+  userMarkerContainer: {
+    width: 60, height: 60, justifyContent: 'center', alignItems: 'center'
+  },
+  userMarkerPulse: {
+    position: 'absolute',
+    width: 40, height: 40, borderRadius: 20,
+    backgroundColor: 'rgba(66, 133, 244, 0.4)'
+  },
+  userMarker: {
+    width: 20, height: 20, borderRadius: 10,
+    backgroundColor: '#fff',
+    justifyContent: 'center', alignItems: 'center',
+    shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3, shadowRadius: 3, elevation: 5
+  },
+  userMarkerDot: {
+    width: 14, height: 14, borderRadius: 7,
+    backgroundColor: '#4285F4',
+    borderWidth: 2, borderColor: '#fff'
+  },
+  reCenterBtn: {
+    position: 'absolute',
+    bottom: 16,
+    right: 16,
+    backgroundColor: 'rgba(255, 255, 255, 0.9)',
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 3.84,
+    elevation: 5,
+  },
   listenBadge: {
     flexDirection: 'row', alignItems: 'center', gap: 4,
     backgroundColor: 'rgba(255,107,157,0.1)',
@@ -772,20 +902,20 @@ const s = StyleSheet.create({
   syncBadge: { marginLeft: 'auto', flexDirection: 'row', alignItems: 'center' },
   syncDot: { width: 6, height: 6, borderRadius: 3, marginRight: 5 },
   syncText: { fontSize: 9, fontFamily: 'monospace' },
-  
+
   scroll: { paddingBottom: 100 },
   center: { alignItems: 'center', paddingHorizontal: 20, paddingTop: 24 },
   leftAlign: { width: '100%', marginBottom: 20 },
   pad20: { padding: 20 },
-  
+
   h1: { color: '#fff', fontSize: 24, fontWeight: 'bold' },
   h1Sub: { color: '#ff6b9d', fontSize: 16, marginTop: 4 },
-  
+
   scoreCard: { width: '100%', padding: 20, backgroundColor: 'rgba(80,250,123,0.05)', borderRadius: 16, borderWidth: 1, borderColor: 'rgba(80,250,123,0.2)', marginBottom: 30 },
   scoreNum: { color: '#50fa7b', fontSize: 36, fontWeight: 'bold' },
   scoreDenom: { fontSize: 16, color: '#50fa7b', opacity: 0.7 },
   scoreText: { color: '#50fa7b', fontSize: 14, marginTop: 8 },
-  
+
   sosTitle: { color: '#c41a1a', fontSize: 20, fontWeight: 'bold', marginBottom: 30, letterSpacing: 1 },
   sosWrapper: { width: 200, height: 200, justifyContent: 'center', alignItems: 'center', marginBottom: 30 },
   ring: { position: 'absolute', width: 160, height: 160, borderRadius: 80, borderWidth: 2 },
@@ -795,40 +925,40 @@ const s = StyleSheet.create({
   sosBtn: { width: 150, height: 150, borderRadius: 75, backgroundColor: '#c41a1a', justifyContent: 'center', alignItems: 'center', shadowColor: '#c41a1a', shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.6, shadowRadius: 30, elevation: 20 },
   sosBtnEmoji: { fontSize: 42 },
   sosBtnText: { color: '#fff', fontWeight: 'bold', fontSize: 20, letterSpacing: 3 },
-  
+
   grid2x2: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', width: '100%', marginBottom: 30 },
   gridItem: { width: '48%', backgroundColor: 'rgba(255,255,255,0.04)', padding: 16, borderRadius: 16, marginBottom: 16, alignItems: 'center', borderWidth: 1, borderColor: 'rgba(255,255,255,0.07)' },
   gridEmoji: { fontSize: 24, marginBottom: 8 },
   gridText: { color: '#ddd', fontSize: 12 },
-  
+
   sectionLabel: { color: '#777', fontSize: 10, letterSpacing: 2, marginBottom: 12, width: '100%' },
   alertRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: 'rgba(255,255,255,0.03)', padding: 12, borderRadius: 12, marginBottom: 8, width: '100%', borderWidth: 1, borderColor: 'rgba(255,255,255,0.05)' },
   alertDotRow: { flexDirection: 'row', alignItems: 'center' },
   incType: { color: '#fff', fontSize: 14 },
   incLoc: { color: '#777', fontSize: 11 },
-  
+
   contactRow: { flexDirection: 'row', alignItems: 'center', padding: 12, backgroundColor: 'rgba(255,255,255,0.04)', borderRadius: 12, marginBottom: 8, width: '100%', borderWidth: 1, borderColor: 'rgba(255,255,255,0.07)' },
   avatar: { width: 40, height: 40, borderRadius: 20, borderWidth: 1.5, justifyContent: 'center', alignItems: 'center', marginRight: 12 },
   contactInfo: { flex: 1 },
   contactName: { color: '#ccc', fontSize: 14 },
   contactMeta: { color: '#777', fontSize: 10 },
-  
+
   alertLabel: { fontSize: 12, letterSpacing: 3, fontFamily: 'monospace', marginBottom: 20 },
   countdownCircle: { width: 140, height: 140, borderRadius: 70, borderWidth: 3, borderColor: 'rgba(196,26,26,0.5)', backgroundColor: '#0a0008', justifyContent: 'center', alignItems: 'center' },
   countNum: { color: '#c41a1a', fontSize: 60, fontWeight: 'bold' },
   cancelBtn: { marginTop: 40, borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)', borderRadius: 24, paddingVertical: 12, paddingHorizontal: 32 },
   cancelText: { color: '#aaa', fontSize: 14 },
-  
+
   radarBox: { width: 180, height: 180, justifyContent: 'center', alignItems: 'center', marginBottom: 30 },
   sendRow: { flexDirection: 'row', alignItems: 'center', padding: 12, borderRadius: 12, marginBottom: 8, width: '100%', borderWidth: 1.5 },
   spinner: { width: 16, height: 16, borderRadius: 8, borderWidth: 2, borderColor: '#ff6b9d', borderTopColor: 'transparent' },
-  
+
   successCircle: { width: 100, height: 100, borderRadius: 50, backgroundColor: 'rgba(80,250,123,0.1)', borderWidth: 3, borderColor: '#50fa7b', justifyContent: 'center', alignItems: 'center', marginBottom: 20, shadowColor: '#50fa7b', shadowOpacity: 0.3, shadowRadius: 20, elevation: 10 },
   sentRow: { flexDirection: 'row', alignItems: 'center', padding: 12, backgroundColor: 'rgba(80,250,123,0.06)', borderRadius: 12, marginBottom: 8, width: '100%', borderWidth: 1, borderColor: 'rgba(80,250,123,0.15)' },
   powerSyncBadge: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(80,250,123,0.06)', borderRadius: 12, padding: 12, marginTop: 16, borderWidth: 1, borderColor: 'rgba(80,250,123,0.2)', width: '100%', justifyContent: 'center' },
   safeBtn: { marginTop: 30, backgroundColor: 'rgba(255,255,255,0.07)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.12)', borderRadius: 24, paddingVertical: 14, paddingHorizontal: 40 },
   safeBtnText: { color: '#ccc', fontSize: 14 },
-  
+
   mapBox: { width: '100%', height: 300, backgroundColor: '#0a1020', borderRadius: 16, borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)', overflow: 'hidden', marginTop: 20, marginBottom: 20 },
   mapDot: { width: 12, height: 12, borderRadius: 6, position: 'absolute' },
   mapMe: { width: 16, height: 16, borderRadius: 8, backgroundColor: '#00e5ff', position: 'absolute', borderWidth: 2, borderColor: '#fff' },
@@ -836,7 +966,7 @@ const s = StyleSheet.create({
   mapLiveBadge: { position: 'absolute', top: 10, right: 10, backgroundColor: 'rgba(196,26,26,0.1)', borderWidth: 1, borderColor: '#c41a1a', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6 },
   legendRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 30 },
   legendText: { color: '#aaa', fontSize: 12 },
-  
+
   chatHeader: { padding: 20, borderBottomWidth: 1, borderBottomColor: 'rgba(255,255,255,0.05)' },
   chatScroll: { padding: 20, paddingBottom: 100 },
   chatRowAi: { width: '100%', alignItems: 'flex-start', marginBottom: 16 },
@@ -847,11 +977,11 @@ const s = StyleSheet.create({
   chatInputRow: { position: 'absolute', bottom: 0, width: '100%', flexDirection: 'row', padding: 16, backgroundColor: '#0c0010', borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.07)' },
   chatInput: { flex: 1, backgroundColor: 'rgba(255,255,255,0.05)', borderRadius: 20, paddingHorizontal: 16, paddingVertical: 10, color: '#fff', marginRight: 10, borderWidth: 1, borderColor: 'rgba(255,255,255,0.07)' },
   sendBtn: { width: 44, height: 44, borderRadius: 22, backgroundColor: '#ff6b9d', justifyContent: 'center', alignItems: 'center' },
-  
+
   repTypeBtn: { width: '48%', padding: 14, backgroundColor: 'rgba(255,255,255,0.04)', borderRadius: 12, marginBottom: 10, alignItems: 'center', borderWidth: 1, borderColor: 'rgba(255,255,255,0.05)' },
   textInput: { width: '100%', backgroundColor: 'rgba(255,255,255,0.04)', borderRadius: 12, padding: 14, color: '#fff', marginBottom: 16, borderWidth: 1, borderColor: 'rgba(255,255,255,0.07)' },
   submitBtn: { width: '100%', padding: 16, backgroundColor: '#c678dd', borderRadius: 12, alignItems: 'center', marginTop: 10 },
-  
+
   bottomNav: { flexDirection: 'row', position: 'absolute', bottom: 0, width: '100%', backgroundColor: '#0c0010', paddingVertical: 12, paddingHorizontal: 20, borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.07)', justifyContent: 'space-between', alignItems: 'center' },
   navItem: { alignItems: 'center', width: 50 },
   navEmoji: { fontSize: 20, marginBottom: 4 },

@@ -20,8 +20,20 @@
         "backgroundImage": "./assets/android-icon-background.png"
       },
       "package": "com.safeher.app",
+      "config": {
+        "googleMaps": {
+          "apiKey": "AIzaSyC-7N39nVQdko6_9ohPomzFhsxbgspxReN7S"
+        }
+      },
       "permissions": [
         "RECORD_AUDIO",
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION",
+        "FOREGROUND_SERVICE",
+        "FOREGROUND_SERVICE_MICROPHONE",
+        "POST_NOTIFICATIONS",
+        "VIBRATE",
         "android.permission.ACCESS_COARSE_LOCATION",
         "android.permission.ACCESS_FINE_LOCATION",
         "android.permission.RECORD_AUDIO",

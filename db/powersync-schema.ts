@@ -27,8 +27,17 @@ const safe_checkins = new Table({
     checked_at: column.text,
 })
 
+const incidents = new Table({
+    type: column.text,
+    location: column.text,
+    details: column.text,
+    severity: column.text,
+    created_at: column.text,
+})
+
 export const AppSchema = new Schema({
     sos_alerts,
     trusted_contacts,
     safe_checkins,
+    incidents,
 })
